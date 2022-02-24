@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+        <title>EasyTransfer</title>
+    </head>
+    <body id="body">
+      <button id="button" type="button">Open USB!</button>
+      <span id="span_device"></span>
+      <br>
+      <label for="input_prg">Choose a .prg file:</label>
+      <input type="file" id="input_prg" accept=".prg">
+      <br>
+      <label for="input_crt">Choose a .crt file:</label>
+      <input type="file" id="input_crt" accept=".crt">
+      <br>
+      <button id="buttonGetDir" type="button">Get Dir</button>
+      <br>
+      <button id="buttonGetSlot6" type="button">Get Slot 6</button>
+    </body>
+        <script type="module">
+
+            import { petsciiLower2Str } from "./PETSCII.mjs"
+            import { Cartridge } from "./Cartridge.mjs"
+            import { EasyFS } from "./EasyFS.mjs"
+            
+            var VENDORID_FTDI = 0x0403;
+            var PRODUCTID_EASYFLASH3 = 0x8738;
+            
+            var device = null;
+            
+            async function onLoad() {
+                button.addEventListener("click", onOpenUSB);
+                buttonGetDir.addEventListener("click", onGetDir);
+                buttonGetSlot6.addEventListener("click", onGetSlot6);
+                input_prg.addEventListener("change", uploadPRG, false);
+                input_crt.addEventListener("change", uploadCRT, false);
+                navigator.usb.addEventListener("connect", event => {
+                    console.log("connect");
+                    console.log(event);
+                    if (!device) {
+                        device = event.device;
+                        span_device.textContent = device.productName;
+                    }
+                });
+                navigator.usb.addEventListener("disconnect", event => {
+                    console.log("disconnect");
+                    console.log(event);
+                    if (device === event.device) {
+                        device = null;
+                        span_device.textContent = "";
+                    }
+                });
+                var devices = await navigator.usb.getDevices();
+                console.log(devices);
+                if (devices.length) {
+                    device = devices[0];
+                    span_device.textContent = device.productName;
+                }
+            }
+            await onLoad();
+
+            var SIO_RESET_REQUEST = 0;
+            var SIO_RESET_SIO = 0;
+            var SIO_RESET_PURGE_RX = 1;
+            var SIO_RESET_PURGE_TX = 2;
+            
+            async function uploadPRG() {
+                var file = input_prg.files[0];
+                var buffer = await file.arrayBuffer();
+            
+                await ef3xfer_connect_ftdi(device);
+
+                await ef3xfer_do_handshake(device, HANDSHAKETYPE_PRG);
+                await sendFile(device, buffer);
+
+                await ef3xfer_disconnect_ftdi(device);
+            }
+
+            async function uploadCRT() {
+                console.log("uploadCRT");
+                console.log(input_crt.files);
+                var file = input_crt.files[0];
+                var buffer = await file.arrayBuffer();
+                console.log(buffer);
+                var cartridge = new Cartridge(buffer);
+                console.log("signature = \"" + cartridge.signature + "\"");
+                console.log("version = " + cartridge.version);
+                console.log("hardware = \"" + Cartridge.hardware2string[cartridge.hardware] + "\"");
+                console.log("exrom = " + cartridge.exrom);
+                console.log("game = " + cartridge.game);
+                console.log("revision = " + cartridge.revision);
+                console.log("name = \"" + cartridge.name + "\" " + cartridge.name.length);
+                console.log(cartridge);
+
+                //var easyFS = new EasyFS(cartridge);
+                //var entry = easyFS.entries[30];
+                //console.log(entry);
+
+                //var blob = new Blob([ entry.data ]);
+                //var blob = new Blob([ cartridge.arrayBuffer() ]);
+                //var url = URL.createObjectURL(blob);
+                //var element = document.createElement("a");
+                //element.setAttribute("href", url);
+                //element.setAttribute("download", entry.name);
+                //element.setAttribute("download", "cartridge.crt");
+                //element.style.display = "none";
+                //document.body.appendChild(element);
+                //element.click();
+                //document.body.removeChild(element);
+                //URL.revokeObjectURL(url);
+
+                await ef3xfer_connect_ftdi(device);
+
+                await ef3xfer_do_handshake(device, HANDSHAKETYPE_CRT);
+                await sendFile(device, buffer);
+
+                await ef3xfer_disconnect_ftdi(device);
+            }
+
+            var encoder = new TextEncoder();
+            var decoder = new TextDecoder();
+            
+            //.byte   $45,$46,$53,$54,$41,$52,$54,$3A  ; "efstart:"
+            
+            var HANDSHAKETYPE_CRT = "CRT"; // => WAIT LOAD
+            var HANDSHAKETYPE_PRG = "PRG"; // => WAIT LOAD
+            var HANDSHAKETYPE_D64 = "D64";
+            
+            var HANDSHAKETYPE_RST = "RST"; // => DONE
+            
+            var RESPONSE_WAIT = 0x57414954;
+            var RESPONSE_ETYP = 0x45545950;
+            var RESPONSE_LOAD = 0x4c4f4144;
+            var RESPONSE_DONE = 0x444f4e45;
+            
+            var RESPONSE_SAVE = 0x53415645;
+            
+            function sleep(ms) {
+                return new Promise(function(resolve, reject) {
+                    setTimeout(function() { resolve(); }, ms);
+                });
+            }
+
+            async function ef3xfer_connect_ftdi(device) {
+                await device.open();
+            
+                await device.selectConfiguration(1);
+                await device.claimInterface(0);
+                await device.selectAlternateInterface(0, 0);
+            
+                var result = await device.controlTransferOut({
+                    requestType: "vendor",
+                    recipient: "device",
+                    request: SIO_RESET_REQUEST,
+                    value: SIO_RESET_SIO,
+                    index: 1
+                });
+                console.log(result);
+            
+                var result = await device.controlTransferOut({
+                    requestType: "vendor",
+                    recipient: "device",
+                    request: SIO_RESET_REQUEST,
+                    value: SIO_RESET_PURGE_RX,
+                    index: 1
+                });
+                console.log(result);
+            
+                var result = await device.controlTransferOut({
+                    requestType: "vendor",
+                    recipient: "device",
+                    request: SIO_RESET_REQUEST,
+                    value: SIO_RESET_PURGE_TX,
+                    index: 1
+                });
+                console.log(result);
+
+                async function reader() {
+                    var result = await device.transferIn(1, 64);
+                    //console.log(result);
+                    if (result.status === "ok") {
+                        var data = result.data;
+                        if (data.byteLength > 2) {
+                            var bytes = new Uint8Array(data.buffer, data.byteOffset + 2);
+                            if (chunk) {
+                                var newChunk = new Uint8Array(chunk.byteLength + data.byteLength - 2);
+                                newChunk.set(chunk);
+                                newChunk.set(bytes, chunk.byteLength);
+                                chunk = newChunk;
+                            }
+                            else {
+                                chunk = bytes;
+                            }
+                            if (resolveRead) {
+                                resolveRead();
+                            }
+                        }
+                        reader();
+                    }
+                };
+                reader();
+            }
+
+            async function ef3xfer_disconnect_ftdi(device) {
+                await sleep(100);
+                await device.reset();
+                await device.releaseInterface(0);
+                await device.close();
+            }
+
+            async function ef3xfer_do_handshake(device, type) {
+                var command = "EFSTART:" + type;
+                console.log("command = " + command);
+                var sendCommand = true;
+                for (;;) {
+                    if (sendCommand) {
+                        sendCommand = false;
+                        //var ts = performance.now();
+                        if (! await send_command(device, command)) {
+                            return 0;
+                        }
+                    }
+            
+                    //var response = await receive_response(device, 30);
+                    //var result = await device.transferIn(1, /*2 + EF3XFER_RESP_SIZE*/64);
+                    var result = await ef3xfer_read_from_ftdi(device, EF3XFER_RESP_SIZE);
+                    console.log(result);
+                    //if (result.status === "ok") {
+                    //    var data = result.data;
+                    //    if (data.byteLength === 2 + EF3XFER_RESP_SIZE) {
+                    //        var code = result.data.getUint32(2);
+                            var code = (new DataView(result)).getUint32(0);
+            console.log(code.toString(16));
+                            switch (code) {
+                                case RESPONSE_WAIT:
+                                    console.log("WAIT");
+                                    await sleep(1000);
+                                    sendCommand = true;
+                                    break;
+                                case RESPONSE_ETYP:
+                                    throw new Error("ETYP response");
+                                case RESPONSE_LOAD:
+                                    console.log("LOAD");
+                                    return;
+                                case RESPONSE_DONE:
+                                    return;
+                                case RESPONSE_SAVE:
+                                    console.log("SAVE");
+                                    return;
+                                default:
+                                    throw new Error("Unknown response");
+                            }
+                    //    }
+                    //}
+            
+                    //sendCommand = performance.now() - ts > 1000;
+                }
+            }
+            
+            async function send_command(device, command) {
+                var data = encoder.encode(command);
+                var zeroTerminatedData = new Uint8Array(data.length + 1);
+                zeroTerminatedData.set(data);
+                console.log(zeroTerminatedData);
+                var result = await ef3xfer_write_to_ftdi(device, zeroTerminatedData);
+                return result === zeroTerminatedData.length;
+            }
+            
+            var EF3XFER_RESP_SIZE = (4 + 1);
+            
+            //async function receive_response(device, timeout_secs) {
+            //    var data = await ef3xfer_read_from_ftdi(device, EF3XFER_RESP_SIZE + 2);
+            //    return data;
+            //}
+            
+            async function ef3xfer_write_to_ftdi(device, data) {
+                var n_written = 0, chunk, size = data.byteLength;
+                while (n_written < size) {
+                    var chunkSize = Math.min(size - n_written, 64);
+                    var chunk = new Uint8Array(data.buffer, data.byteOffset + n_written, chunkSize);
+            
+                    var result = await device.transferOut(2, chunk);
+                    //console.log(result);
+            
+                    n_written += result.bytesWritten;
+                    console.log(n_written);
+                }
+            
+                return n_written;
+            }
+            
+            var resolveRead = null;
+            var chunk = null;
+            async function ef3xfer_read_from_ftdi(device, size) {
+            try {
+                var data = new Uint8Array(size);
+                var byteOffset = 0;
+                while (size > 0) {
+                    console.log(size);
+                    if (!chunk) {
+                        //var result = await device.transferIn(1, 64);
+                        //console.log(result);
+                        //chunk = new Uint8Array(result.data.buffer, result.data.byteOffset + 2);
+                        await new Promise(function(resolve, reject) {
+                            resolveRead = resolve;
+                        });
+                        resolveRead = null;
+                    }
+                    if (chunk.length > size) {
+                        data.set(new Uint8Array(chunk.buffer, chunk.byteOffset, size), byteOffset);
+                        chunk = new Uint8Array(chunk.buffer, chunk.byteOffset + size);
+                        byteOffset += size;
+                        size = 0;
+                    }
+                    else {
+                        data.set(chunk, byteOffset);
+                        byteOffset += chunk.length;
+                        size -= chunk.length;
+                        chunk = null;
+                    }
+                }
+                return data.buffer;
+            } catch (ex) { console.log(ex); }
+            }
+            
+            async function sendFile(device, buffer) {
+                var dv = new DataView(new ArrayBuffer(2));
+                for (var offset = 0, bytesAvailable = buffer.byteLength; /*bytesAvailable > 0*/;) {
+                    var result = await ef3xfer_read_from_ftdi(device, 2);
+                    var bytesRequested = (new DataView(result)).getUint16(0, true);
+                    console.log("bytesRequested = " + bytesRequested);
+                    if (bytesRequested === 0) {
+                        break;
+                    }
+                    bytesRequested = Math.min(bytesRequested, bytesAvailable);
+                    dv.setUint16(0, bytesRequested, true);
+                    result = await ef3xfer_write_to_ftdi(device, dv);
+                    result = await ef3xfer_write_to_ftdi(device, new Uint8Array(buffer, offset, bytesRequested));
+                    offset += result;
+                    bytesAvailable -= result;
+                }
+            }
+
+            async function readFlash(slot, bank, address, size) {
+                await ef3xfer_do_handshake(device, "WEB");
+                var dv = new DataView(new ArrayBuffer(6));
+                dv.setUint8(0, slot);
+                dv.setUint8(1, bank);
+                dv.setUint16(2, address, true);
+                dv.setUint16(4, size, true);
+                var result = await ef3xfer_write_to_ftdi(device, dv);
+
+                return await ef3xfer_read_from_ftdi(device, size);
+            }
+
+            async function onGetDir() {
+                var response = await fetch("webc64flash");
+                var buffer = await response.arrayBuffer();
+
+                await ef3xfer_connect_ftdi(device);
+
+                await ef3xfer_do_handshake(device, HANDSHAKETYPE_PRG);
+                await sendFile(device, buffer);
+
+                var result = await readFlash(0, 0x10, 0x8000, 467);
+
+                //typedef struct efmenu_dir_s
+                //{
+                //    char        signature[16]; 0
+                //    char        slots[16][16]; 16
+                //    char        kernals[8][16]; 272
+                //    char        freezers[4][16]; 400
+                //    uint8_t     boot_mode; 464
+                //    uint16_t    checksum; 465
+                //} efmenu_dir_t; 467
+                var signature = petsciiLower2Str(new Uint8Array(result, 0, 16));
+                console.log("signature: " + signature);
+                for (var i = 0; i < 16; ++i) {
+                    var slot = petsciiLower2Str(new Uint8Array(result, 16 + (i << 4), 16));
+                    console.log("slot " + i + ": " + slot);
+                }
+                for (var i = 0; i < 8; ++i) {
+                    var kernal = petsciiLower2Str(new Uint8Array(result, 272 + (i << 4), 16));
+                    var result2 = await readFlash(0, i, 0x8000 + 0x2000 - 4, 4);
+                    var code = (new DataView(result2)).getUint32(0);
+                    console.log("kernal " + i + ": " + kernal + ' 0x' + code.toString(16));
+                }
+                for (var i = 0; i < 4; ++i) {
+                    var freezer = petsciiLower2Str(new Uint8Array(result, 400 + (i << 4), 16));
+                    console.log("freezer " + i + ": " + freezer);
+                }
+                var dv = new DataView(result);
+                console.log("bootmode = " + dv.getUint8(464));
+                console.log("checksum = " + dv.getUint16(465, true));
+            
+                await ef3xfer_do_handshake(device, "RST");
+
+                await ef3xfer_disconnect_ftdi(device);
+            }
+
+            async function onGetSlot6() {
+                var slot = 1;
+
+                var response = await fetch("webc64flash");
+                var buffer = await response.arrayBuffer();
+
+                var cartridge = new Cartridge();
+                cartridge.signature = Cartridge.C64_CARTRIDGE;
+                cartridge.version = Cartridge.VERSION_1_0;
+                cartridge.hardware = Cartridge.CARTRIDGE_EASYFLASH;
+                cartridge.exrom = 1;
+                cartridge.game = 0;
+                cartridge.revision = 0;
+                cartridge.name = "SLOT" + slot;
+                cartridge.chip = [];
+
+                await ef3xfer_connect_ftdi(device);
+
+                await ef3xfer_do_handshake(device, HANDSHAKETYPE_PRG);
+                await sendFile(device, buffer);
+
+                var chip = cartridge.chip;
+                for (var bank = 0; bank < 64; ++bank) {
+                    var result = await readFlash(slot, bank, 0x8000, 0x2000);
+                    chip.push(new Cartridge.Chip(Cartridge.Chip.TYPE_FLASH, bank, 0x8000, new Uint8Array(result)));
+                    var result = await readFlash(slot, bank, 0xa000, 0x2000);
+                    chip.push(new Cartridge.Chip(Cartridge.Chip.TYPE_FLASH, bank, 0xa000, new Uint8Array(result)));
+                }
+
+                await ef3xfer_do_handshake(device, "RST");
+
+                await ef3xfer_disconnect_ftdi(device);
+
+                var buffer = cartridge.arrayBuffer();
+                var blob = new Blob([ buffer ]);
+                var url = URL.createObjectURL(blob);
+                var element = document.createElement("a");
+                element.setAttribute("href", url);
+                element.setAttribute("download", "slot" + slot + ".crt");
+                element.style.display = "none";
+                document.body.appendChild(element);
+                element.click();
+                document.body.removeChild(element);
+                URL.revokeObjectURL(url);
+            }
+
+            async function onOpenUSB() {
+                var requestOptions = {
+                    filters: [
+                        {
+                            vendorId: VENDORID_FTDI,
+                            productId: PRODUCTID_EASYFLASH3
+                        }
+                    ]
+                };
+                device = await navigator.usb.requestDevice(requestOptions);
+                console.log(device);
+            }
+            
+                  </script>
+</html>
